@@ -1,0 +1,23 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Install this app</title>
+    <style>
+        body {
+            font-size: 14px;
+            font-family: sans-serif;
+        }
+    </style>
+</head>
+<body>
+    <h1>Install this app</h1>
+    <form action="{{ url_for('authorize') }}">
+        <div>
+            <label for="shop">shop (your_shop.myshopify.com)</label>
+            <input id="shop" name="shop">
+        </div>
+        <input type="submit" value="install">
+    </form>
+</body>
+</html>

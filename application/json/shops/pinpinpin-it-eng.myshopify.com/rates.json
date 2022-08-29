@@ -1,0 +1,12 @@
+[
+	{
+		"min_price": 0,
+		"max_price": 100,
+		"price": 11
+	},
+	{
+		"min_price": 100,
+		"max_price": false,
+		"price": 0
+	}
+]

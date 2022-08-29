@@ -1,0 +1,241 @@
+from application import app
+from application.models import *
+
+from application.lib import yageocoder
+from application.lib import omniva
+from application.lib.validator import *
+from application.lib.main import *
+
+from flask import jsonify, abort, request
+
+import time
+import math
+import shopify
+
+@app.route('/get_rates', methods=['POST'])
+def get_rates():
+    if request.is_json and validate_webhook_request(request, app.config.get("SHOPIFY_API_SECRET")):
+        start_time = time.time()
+
+        headers = request.headers
+        shop_name = headers['X-Shopify-Shop-Domain']
+
+        try:
+            merchant = Merchant.get(Merchant.myshopify_domain == shop_name)
+            if merchant.active:
+                with shopify.Session.temp(merchant.myshopify_domain, merchant.token):
+                    shop = shopify.Shop.current()
+                    metafields = shop.metafields()
+                    for metafield in metafields:
+                        key = metafield.key
+                        if metafield.namespace == app.config.get("METAFIELD_NAMESPACE") \
+                        and key == "data":
+                            metafield_data = parse_metafield_value(metafield)
+                            break
+
+                min_days = 1
+
+
+                encoding = "utf-8"
+
+                DIRNAME = app.config.get("DIRNAME") + "/application/"
+                path_to_json = DIRNAME + "/json/"
+                path_to_prices = path_to_json + "/prices/"
+                path_to_weights = path_to_prices + "/weight/"
+                path_to_sizes = path_to_prices + "/size/"
+
+                with open(path_to_json + "zones.json", "r", encoding=encoding) as file:
+                    data = file.read()
+                    zones = json.loads(data)
+
+                with open(path_to_weights + "weight.json") as file:
+                    data = file.read()
+                    price_weights = json.loads(data)
+
+                with open(path_to_sizes + "prices.json") as file:
+                    data = file.read()
+                    price_sizes = json.loads(data)
+
+                custom_rates = []
+
+                try:
+                    with open("{}/shops/{}/rates.json".format(path_to_json, merchant.myshopify_domain),"r") as file:
+                        data = file.read()
+                        custom_rates = json.loads(data)
+                except Exception as e:
+                    metafield_data["custom"] = False
+
+                try:
+                    max_days = int(metafield_data["max_days"])
+                except Exception as e:
+                    max_days = min_days
+
+                data = request.get_json()["rate"]
+                destination = data["destination"]
+                raw_address = "{}, {}, {}".format(destination["city"], destination["address1"], destination["postal_code"])
+
+                validated_address = yageocoder.get_full_data(raw_address, "et_EE")
+
+                if not validated_address:
+                    return jsonify({
+                        "rates": []
+                    })
+
+                country_code = validated_address["country_code"]
+                locality = validated_address["locality"]
+
+                if country_code in price_sizes:
+                    items = data["items"]
+
+                    is_post_office = metafield_data["post_office"]
+                    is_parcel_machine = metafield_data["machine"]
+
+                    if is_post_office or is_parcel_machine:
+
+                        if is_post_office and is_parcel_machine:
+                            code = -1
+                        elif is_parcel_machine:
+                            code = 0
+                        elif is_post_office:
+                            code = 1
+
+                        parcel_points = omniva.get_parcel_points(country_code, locality=locality, limit=math.inf, code = code)
+
+                    else:
+
+                        parcel_points = []
+
+                    print("Parcel points found: {} for city {}".format(len(parcel_points), locality))
+
+                    items_price = physical_items = courier_price = total_weight_kg = current_weight = total_price = current_height = 0
+
+                    if metafield_data["calculate"]:
+                        for i, item in enumerate(items):
+                            sizes = get_product_sizes(app, item["product_id"],merchant.myshopify_domain,merchant.token)
+
+                            width = int(sizes["width"])
+                            height = int(sizes["height"])
+                            length = int(sizes["length"])
+
+                            parcel_size = omniva.get_size(height)
+
+                            weight = int(item["grams"])
+                            weight_kg = weight / 1000
+
+                            total_weight_kg += weight_kg
+
+                            price_list = price_sizes[country_code]
+                            current_price = price_list[parcel_size]
+
+                            courier_price += current_price
+
+                            items_price += item["price"]
+
+                            if country_code in app.config.get("TO_PICKUP"):
+                                quantity = int(item["quantity"])
+
+                                if height <= 39 and width <= 38 and length <= 64:
+                                    for _ in range(quantity):
+                                        physical_items += 1
+                                        if current_height + height > 39 or current_weight > 30:
+
+                                            total_price += current_price
+
+                                            current_height = height
+                                            current_weight = weight
+                                        else:
+                                            current_height += height
+                                            current_weight += weight
+
+                                    if i + 1 == len(items):
+                                        total_price += current_price
+
+                    if metafield_data["custom"] and len(custom_rates):
+                        for custom_rate in custom_rates:
+                            min_price = custom_rate["min_price"]
+                            max_price = custom_rate["max_price"] if custom_rate["max_price"] else math.inf
+                            if is_in_range(items_price, min_price, max_price):
+                                custom_price = total_price = custom_rate["price"]
+                               break
+                    rates = [
+                        get_rate("EUR", total_price, max_days, min_days, parcel_point["NAME"], "trmOmniva_{}_{}".format(parcel_point["TYPE"], parcel_point["ZIP"]))
+                        for parcel_point in parcel_points
+                    ]
+
+                    if metafield_data["courier"]:
+                        found = False
+
+                        if not total_weight_kg:
+                            total_weight_kg = .01
+
+                        omniva_service = metafield_data["courier_service"]
+
+                        if omniva_service in price_weights:
+                            price_list = price_weights[omniva_service]
+
+                            for block in price_list:
+                                min_weight = block["min_weight"]
+                                max_weight = block["max_weight"]
+                                if is_in_range(total_weight_kg, min_weight, max_weight):
+                                    if omniva_service == "CI":
+                                        if country_code in block:
+                                            found = True
+                                            total_price = block[country_code]
+                                            service_name = "Courier Baltic"
+                                            break
+                                    elif omniva_service == "EA":
+                                        for zone in zones:
+                                            countries = zones[zone]
+                                            if country_code in countries:
+                                                found = True
+                                                total_price = block[zone]
+                                                service_name = "EMS"
+                                                break
+                                    elif omniva_service == "CC":
+                                        found = True
+                                        price_per_kg = block["price_per_kg"]
+                                        price_per_item = block["price_per_item"]
+                                        total_price = total_weight_kg * price_per_kg + physical_items * price_per_item
+                                        service_name = "Maxi"
+                                        break
+
+                                    elif omniva_service == "LX" or omniva_service == "LZ" or omniva_service == "LA":
+                                        if omniva_service == "LA":
+                                            service_name = "Kuller 10"
+                                        elif omniva_service == "LX":
+                                            service_name = "Courier Plus"
+                                        elif omniva_service == "LZ":
+                                            service_name = "Courier Standart"
+
+                                        total_price = block["price"]
+                                        found = True
+                                        break
+
+                        elif country_code != "EE" and country_code != "LV" and country_code != "LT":
+                            found = True
+                            if omniva_service == "QB":
+                                service_name = "Courier Europe"
+
+                        if metafield_data["custom"]:
+                            total_price = custom_price
+
+                        if not metafield_data["calculate"]:
+                            total_price = 0
+
+                        if found:
+                            rate = get_rate("EUR", total_price, max_days, min_days, service_name, "trmOmniva_{}_{}".format(omniva_service, "POSTALCODE"))
+                            rates.append(rate)
+
+                    print(len(rates), " RATES RETURNED")
+                    print("The request took us {}s.".format(time.time() - start_time))
+                    return jsonify({"rates": rates})
+                else:
+                    return jsonify({"status": True})
+
+            else:
+                abort(403)
+        except Merchant.DoesNotExist:
+            abort(403)
+
+    else:
+        abort(403)

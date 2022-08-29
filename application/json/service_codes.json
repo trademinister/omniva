@@ -1,0 +1,17 @@
+{
+    "EMPTY_VALUE": "",
+    "CC": "Maxi Parcel",
+    "CI": "Courier Baltic",
+    "EA": "EMS",
+    "LA": "Courier 10",
+    "LX": "Courier Plus",
+    "LZ": "Courier Standart",
+    "QB": "Courier Europe",
+    "XJ": "Insured Maxi Business Letter",
+    "XN": "Business Registered Maxi Letter",
+    "PU": "Parcel machine – courier pick-up",
+    "PK": "Parcel machine – courier delivery",
+    "PV": "Parcel machine – sending from post office",
+    "PO": "Parcel machine – delivery from post office",
+    "PP": "Parcel machine – from sorting center"
+}
